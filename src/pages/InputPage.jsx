@@ -322,7 +322,7 @@ export default function InputPage() {
           {/* Data sources badge */}
           <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
             <span className="text-xs text-slate-600">Powered by:</span>
-            {['Gemini 3.1 Pro', 'Google Places', 'Demographics API', 'Earnings Data', 'Google TTS'].map(s => (
+            {['Gemini 3.1 Pro', 'Google Places', 'Demographics API', 'Earnings Data', 'ElevenLabs'].map(s => (
               <span key={s} className="text-xs bg-[#1E293B] text-slate-500 px-2.5 py-1 rounded-full border border-[#334155]">
                 {s}
               </span>
