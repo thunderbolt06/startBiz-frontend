@@ -1,8 +1,11 @@
 import axios from 'axios'
 
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: `${BASE_URL}/api`,
   headers: { 'Content-Type': 'application/json' },
+  withCredentials: false,
 })
 
 export async function createSession(prompt, extraData = {}) {
@@ -32,5 +35,5 @@ export async function getResults(sessionId) {
 }
 
 export function createSSEStream(sessionId) {
-  return new EventSource(`/api/sessions/${sessionId}/stream/`)
+  return new EventSource(`${BASE_URL}/api/sessions/${sessionId}/stream/`)
 }
