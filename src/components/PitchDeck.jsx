@@ -1,11 +1,17 @@
-import { useState, useEffect, useRef } from 'react'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { ChevronLeft, ChevronRight, Play, Pause } from 'lucide-react'
 import {
   BarChart, Bar, PieChart, Pie, Cell, LineChart, Line,
   XAxis, YAxis, Tooltip, Legend, ResponsiveContainer
 } from 'recharts'
+import {
+  buildNarrationIndex,
+  computeSlideTimestamps,
+  fuzzyMatchTitle,
+} from '../lib/slideTimestamps'
 
 const CHART_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4', '#F97316']
+const SLIDE_DURATION_MS = 8000
 
 function SlideChart({ chartData }) {
   if (!chartData) return null
@@ -97,7 +103,7 @@ function SlideContent({ content }) {
 }
 
 function Slide({ slide }) {
-  const { type, title, content, chart_data, needs_image, image_prompt } = slide
+  const { type, title, content, chart_data } = slide
 
   if (type === 'title') {
     return (
@@ -145,31 +151,224 @@ function Slide({ slide }) {
   )
 }
 
-export default function PitchDeck({ slides }) {
+export default function PitchDeck({ slides, audioUrl }) {
   const [current, setCurrent] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [slideTimestamps, setSlideTimestamps] = useState(null)
+  // Fallback ticker for when there's no audio
+  const [fallbackElapsed, setFallbackElapsed] = useState(0)
+
+  const audioRef = useRef(null)
+  const narrationIndexRef = useRef(null)
+  const fallbackIntervalRef = useRef(null)
+  // Track whether the current-slide change came from audio sync (to avoid feedback loop)
+  const audioSyncingRef = useRef(false)
+
   const total = slides.length
 
-  function prev() { setCurrent(c => Math.max(0, c - 1)) }
-  function next() { setCurrent(c => Math.min(total - 1, c + 1)) }
+  // Build narration index once
+  useEffect(() => {
+    narrationIndexRef.current = buildNarrationIndex(slides)
+  }, [slides])
 
+  // ── Audio event listeners ──────────────────────────────────────────────────
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio || !audioUrl) return
+
+    const onMetadata = () => {
+      const dur = audio.duration
+      setDuration(dur)
+      if (narrationIndexRef.current) {
+        setSlideTimestamps(computeSlideTimestamps(slides, dur))
+      }
+    }
+
+    const onTimeUpdate = () => {
+      setCurrentTime(audio.currentTime)
+    }
+
+    const onEnded = () => {
+      setPlaying(false)
+      setCurrentTime(audio.duration)
+    }
+
+    audio.addEventListener('loadedmetadata', onMetadata)
+    audio.addEventListener('timeupdate', onTimeUpdate)
+    audio.addEventListener('ended', onEnded)
+
+    // If metadata already available (e.g. cached)
+    if (audio.readyState >= 1 && audio.duration) {
+      onMetadata()
+    }
+
+    return () => {
+      audio.removeEventListener('loadedmetadata', onMetadata)
+      audio.removeEventListener('timeupdate', onTimeUpdate)
+      audio.removeEventListener('ended', onEnded)
+    }
+  }, [audioUrl, slides])
+
+  // ── Audio-driven slide advance ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!slideTimestamps || !audioUrl) return
+
+    const ts = slideTimestamps[current]
+    if (!ts) return
+
+    // Determine next slide index to advance to
+    let target = -1
+
+    if (currentTime >= ts.end && current < total - 1) {
+      // Time boundary crossed — use fuzzy match to double-check or just advance
+      const nextIdx = current + 1
+      const nextTitle = slides[nextIdx]?.title || ''
+      const { fullScript } = narrationIndexRef.current || {}
+
+      if (fullScript && nextTitle) {
+        const windowStart = Math.max(0, Math.floor((ts.end / duration) * fullScript.length) - 80)
+        const windowEnd = Math.min(fullScript.length, windowStart + 200)
+        const window = fullScript.slice(windowStart, windowEnd)
+        // Accept fuzzy match OR fall through on time boundary
+        if (fuzzyMatchTitle(nextTitle, window) || currentTime >= ts.end + 0.5) {
+          target = nextIdx
+        }
+      } else {
+        target = nextIdx
+      }
+    }
+
+    if (target !== -1 && target !== current) {
+      audioSyncingRef.current = true
+      setCurrent(target)
+    }
+  }, [currentTime, current, slideTimestamps, slides, total, duration, audioUrl])
+
+  // ── Fallback ticker (no audio) ─────────────────────────────────────────────
+  useEffect(() => {
+    if (audioUrl || !playing) {
+      clearInterval(fallbackIntervalRef.current)
+      return
+    }
+
+    fallbackIntervalRef.current = setInterval(() => {
+      setFallbackElapsed(e => {
+        if (e + 100 >= SLIDE_DURATION_MS) {
+          // Advance slide
+          setCurrent(c => {
+            const next = Math.min(total - 1, c + 1)
+            if (next === total - 1) {
+              // Stop at last slide
+              setPlaying(false)
+              clearInterval(fallbackIntervalRef.current)
+            }
+            return next
+          })
+          return 0
+        }
+        return e + 100
+      })
+    }, 100)
+
+    return () => clearInterval(fallbackIntervalRef.current)
+  }, [audioUrl, playing, total])
+
+  // Reset fallback elapsed when slide changes manually (not from audio sync)
+  useEffect(() => {
+    if (!audioSyncingRef.current) {
+      setFallbackElapsed(0)
+    }
+    audioSyncingRef.current = false
+  }, [current])
+
+  // ── Keyboard navigation ────────────────────────────────────────────────────
   useEffect(() => {
     function onKey(e) {
-      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next()
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') prev()
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') goToSlide(c => Math.min(total - 1, c + 1))
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') goToSlide(c => Math.max(0, c - 1))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [total, slideTimestamps]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Navigation helpers ─────────────────────────────────────────────────────
+  const seekAudio = useCallback((index) => {
+    const audio = audioRef.current
+    if (!audio || !slideTimestamps) return
+    const ts = slideTimestamps[index]
+    if (!ts) return
+    audio.currentTime = ts.start
+    setCurrentTime(ts.start)
+  }, [slideTimestamps])
+
+  const goToSlide = useCallback((indexOrUpdater) => {
+    setCurrent(prev => {
+      const next = typeof indexOrUpdater === 'function' ? indexOrUpdater(prev) : indexOrUpdater
+      seekAudio(next)
+      setFallbackElapsed(0)
+      return next
+    })
+  }, [seekAudio])
+
+  function prev() { goToSlide(c => Math.max(0, c - 1)) }
+  function next() { goToSlide(c => Math.min(total - 1, c + 1)) }
+
+  function togglePlay() {
+    if (audioUrl) {
+      const audio = audioRef.current
+      if (!audio) return
+      if (playing) {
+        audio.pause()
+        setPlaying(false)
+      } else {
+        audio.play()
+        setPlaying(true)
+      }
+    } else {
+      setPlaying(p => !p)
+    }
+  }
+
+  // ── Loader bar progress ────────────────────────────────────────────────────
+  let loaderPercent = 0
+  if (audioUrl && slideTimestamps) {
+    const ts = slideTimestamps[current]
+    if (ts && ts.end > ts.start) {
+      loaderPercent = Math.min(100, Math.max(0,
+        ((currentTime - ts.start) / (ts.end - ts.start)) * 100
+      ))
+    }
+  } else if (!audioUrl && playing) {
+    loaderPercent = Math.min(100, (fallbackElapsed / SLIDE_DURATION_MS) * 100)
+  }
 
   if (!slides?.length) return null
 
   return (
     <div className="w-full">
+      {/* Hidden audio element */}
+      {audioUrl && (
+        <audio ref={audioRef} src={audioUrl} preload="metadata" />
+      )}
+
       {/* Slide viewport */}
       <div className="relative w-full rounded-2xl overflow-hidden border border-[#334155]"
         style={{ paddingBottom: '56.25%' }}>
         <div className="absolute inset-0">
           <Slide slide={slides[current]} />
+        </div>
+
+        {/* Loader bar — bottom edge of slide */}
+        <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#1E293B]/60">
+          <div
+            className="h-full bg-gradient-to-r from-blue-500 to-emerald-400 rounded-full"
+            style={{
+              width: `${loaderPercent}%`,
+              transition: playing ? 'width 0.3s linear' : 'none',
+            }}
+          />
         </div>
       </div>
 
@@ -184,17 +383,32 @@ export default function PitchDeck({ slides }) {
           Previous
         </button>
 
-        {/* Dot indicators */}
-        <div className="flex gap-1.5">
-          {slides.map((_, i) => (
-            <button
-              key={i}
-              onClick={() => setCurrent(i)}
-              className={`rounded-full transition-all ${
-                i === current ? 'w-6 h-2 bg-blue-400' : 'w-2 h-2 bg-slate-600 hover:bg-slate-400'
-              }`}
-            />
-          ))}
+        {/* Centre: dots + play button */}
+        <div className="flex items-center gap-3">
+          {/* Dot indicators */}
+          <div className="flex gap-1.5 items-center">
+            {slides.map((_, i) => (
+              <button
+                key={i}
+                onClick={() => goToSlide(i)}
+                className={`rounded-full transition-all ${
+                  i === current ? 'w-6 h-2 bg-blue-400' : 'w-2 h-2 bg-slate-600 hover:bg-slate-400'
+                }`}
+              />
+            ))}
+          </div>
+
+          {/* Play / Pause button */}
+          <button
+            onClick={togglePlay}
+            className="w-9 h-9 rounded-full bg-blue-600 hover:bg-blue-500 flex items-center justify-center transition-colors shadow-lg shadow-blue-900/40 ml-1"
+            title={playing ? 'Pause' : 'Play presentation'}
+          >
+            {playing
+              ? <Pause size={15} className="text-white" />
+              : <Play size={15} className="text-white ml-0.5" />
+            }
+          </button>
         </div>
 
         <button

@@ -206,7 +206,7 @@ export default function ResultsPage() {
           <div>
             {slides_json?.length > 0 ? (
               <div className="space-y-6">
-                <PitchDeck slides={slides_json} />
+                <PitchDeck slides={slides_json} audioUrl={audio_url} />
                 {pdf_url && (
                   <div className="flex justify-center">
                     <a
