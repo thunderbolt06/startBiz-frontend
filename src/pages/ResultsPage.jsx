@@ -53,6 +53,23 @@ function RecommendationBadge({ thesis }) {
   )
 }
 
+async function triggerDownload(url, filename) {
+  try {
+    const res = await fetch(url)
+    const blob = await res.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objectUrl
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(objectUrl)
+  } catch {
+    window.open(url, '_blank')
+  }
+}
+
 export default function ResultsPage() {
   const { sessionId } = useParams()
   const navigate = useNavigate()
@@ -129,14 +146,13 @@ export default function ResultsPage() {
             {thesis_md && <ScoreBadge thesis={thesis_md} />}
             {thesis_md && <RecommendationBadge thesis={thesis_md} />}
             {pdf_url && (
-              <a
-                href={pdf_url}
-                download
+              <button
+                onClick={() => triggerDownload(pdf_url, 'pitch-deck.pdf')}
                 className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
               >
                 <Download size={14} />
                 Download PDF
-              </a>
+              </button>
             )}
           </div>
         </div>
@@ -209,14 +225,13 @@ export default function ResultsPage() {
                 <PitchDeck slides={slides_json} audioUrl={audio_url} />
                 {pdf_url && (
                   <div className="flex justify-center">
-                    <a
-                      href={pdf_url}
-                      download
+                    <button
+                      onClick={() => triggerDownload(pdf_url, 'pitch-deck.pdf')}
                       className="flex items-center gap-2 bg-[#1E293B] hover:bg-[#334155] border border-[#334155] text-slate-300 hover:text-white text-sm font-medium px-5 py-2.5 rounded-xl transition-all"
                     >
                       <Download size={15} />
                       Download as PDF
-                    </a>
+                    </button>
                   </div>
                 )}
               </div>
@@ -241,14 +256,13 @@ export default function ResultsPage() {
             </div>
             <AudioPlayer src={audio_url} />
             <div className="text-center">
-              <a
-                href={audio_url}
-                download
+              <button
+                onClick={() => triggerDownload(audio_url, 'pitch-narration.mp3')}
                 className="inline-flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300 transition-colors"
               >
                 <Download size={14} />
                 Download MP3
-              </a>
+              </button>
             </div>
           </div>
         )}

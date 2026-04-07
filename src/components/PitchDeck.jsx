@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { ChevronLeft, ChevronRight, Play, Pause } from 'lucide-react'
 import {
   BarChart, Bar, PieChart, Pie, Cell, LineChart, Line,
@@ -163,8 +163,13 @@ export default function PitchDeck({ slides, audioUrl }) {
   const audioRef = useRef(null)
   const narrationIndexRef = useRef(null)
   const fallbackIntervalRef = useRef(null)
+  // Mirror slideTimestamps in a ref so navigation callbacks always have the latest
+  // value without stale closure issues, independent of React's render cycle.
+  const slideTimestampsRef = useRef(null)
   // Track whether the current-slide change came from audio sync (to avoid feedback loop)
   const audioSyncingRef = useRef(false)
+  // Mirror current slide in a ref so the keyboard handler is always up-to-date
+  const currentRef = useRef(0)
 
   const total = slides.length
 
@@ -182,7 +187,15 @@ export default function PitchDeck({ slides, audioUrl }) {
       const dur = audio.duration
       setDuration(dur)
       if (narrationIndexRef.current) {
-        setSlideTimestamps(computeSlideTimestamps(slides, dur))
+        const ts = computeSlideTimestamps(slides, dur)
+        slideTimestampsRef.current = ts
+        setSlideTimestamps(ts)
+        // If user navigated before metadata loaded, seek to the correct position now
+        const idx = currentRef.current
+        if (idx > 0 && ts[idx]) {
+          audio.currentTime = ts[idx].start
+          setCurrentTime(ts[idx].start)
+        }
       }
     }
 
@@ -230,9 +243,8 @@ export default function PitchDeck({ slides, audioUrl }) {
       if (fullScript && nextTitle) {
         const windowStart = Math.max(0, Math.floor((ts.end / duration) * fullScript.length) - 80)
         const windowEnd = Math.min(fullScript.length, windowStart + 200)
-        const window = fullScript.slice(windowStart, windowEnd)
-        // Accept fuzzy match OR fall through on time boundary
-        if (fuzzyMatchTitle(nextTitle, window) || currentTime >= ts.end + 0.5) {
+        const textWindow = fullScript.slice(windowStart, windowEnd)
+        if (fuzzyMatchTitle(nextTitle, textWindow) || currentTime >= ts.end + 0.5) {
           target = nextIdx
         }
       } else {
@@ -242,6 +254,7 @@ export default function PitchDeck({ slides, audioUrl }) {
 
     if (target !== -1 && target !== current) {
       audioSyncingRef.current = true
+      currentRef.current = target
       setCurrent(target)
     }
   }, [currentTime, current, slideTimestamps, slides, total, duration, audioUrl])
@@ -256,11 +269,10 @@ export default function PitchDeck({ slides, audioUrl }) {
     fallbackIntervalRef.current = setInterval(() => {
       setFallbackElapsed(e => {
         if (e + 100 >= SLIDE_DURATION_MS) {
-          // Advance slide
           setCurrent(c => {
             const next = Math.min(total - 1, c + 1)
+            currentRef.current = next
             if (next === total - 1) {
-              // Stop at last slide
               setPlaying(false)
               clearInterval(fallbackIntervalRef.current)
             }
@@ -275,7 +287,7 @@ export default function PitchDeck({ slides, audioUrl }) {
     return () => clearInterval(fallbackIntervalRef.current)
   }, [audioUrl, playing, total])
 
-  // Reset fallback elapsed when slide changes manually (not from audio sync)
+  // Reset fallback elapsed when slide changes (skip for audio-driven changes)
   useEffect(() => {
     if (!audioSyncingRef.current) {
       setFallbackElapsed(0)
@@ -283,37 +295,35 @@ export default function PitchDeck({ slides, audioUrl }) {
     audioSyncingRef.current = false
   }, [current])
 
+  // ── Core navigation: seek audio then update slide ──────────────────────────
+  // Uses refs so it is always fresh — safe to call from event handlers and
+  // useEffect callbacks without stale-closure concerns.
+  function goToSlide(idx) {
+    const clamped = Math.max(0, Math.min(total - 1, idx))
+    // Seek audio synchronously via ref (no stale closure)
+    const audio = audioRef.current
+    const ts = slideTimestampsRef.current
+    if (audio && ts && ts[clamped]) {
+      audio.currentTime = ts[clamped].start
+      setCurrentTime(ts[clamped].start)
+    }
+    setFallbackElapsed(0)
+    currentRef.current = clamped
+    setCurrent(clamped)
+  }
+
+  function prev() { goToSlide(currentRef.current - 1) }
+  function next() { goToSlide(currentRef.current + 1) }
+
   // ── Keyboard navigation ────────────────────────────────────────────────────
   useEffect(() => {
     function onKey(e) {
-      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') goToSlide(c => Math.min(total - 1, c + 1))
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') goToSlide(c => Math.max(0, c - 1))
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') goToSlide(currentRef.current + 1)
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') goToSlide(currentRef.current - 1)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [total, slideTimestamps]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Navigation helpers ─────────────────────────────────────────────────────
-  const seekAudio = useCallback((index) => {
-    const audio = audioRef.current
-    if (!audio || !slideTimestamps) return
-    const ts = slideTimestamps[index]
-    if (!ts) return
-    audio.currentTime = ts.start
-    setCurrentTime(ts.start)
-  }, [slideTimestamps])
-
-  const goToSlide = useCallback((indexOrUpdater) => {
-    setCurrent(prev => {
-      const next = typeof indexOrUpdater === 'function' ? indexOrUpdater(prev) : indexOrUpdater
-      seekAudio(next)
-      setFallbackElapsed(0)
-      return next
-    })
-  }, [seekAudio])
-
-  function prev() { goToSlide(c => Math.max(0, c - 1)) }
-  function next() { goToSlide(c => Math.min(total - 1, c + 1)) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   function togglePlay() {
     if (audioUrl) {
